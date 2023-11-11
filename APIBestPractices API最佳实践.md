@@ -6,6 +6,8 @@
 
 如果您在代码review中发现一个 proto 与这些准则有出入，请告知作者这个指导，并帮助传播这个信息。
 
+【译者注：这文章里提的有一半的也不是很好，说得也不太清楚，仅供参考，实际还是看自己业务代码情况】
+
 ### 注意 
 
 这些准则仅仅是准则，许多准则都有例外。例如，如果您正在编写性能关键的后端，您可能希望为了速度而牺牲灵活性或安全性。本主题将帮助您更好地了解权衡，并为您的情况做出适当的决策。 
@@ -127,7 +129,6 @@ message NumericResult {
 
 例如，在返回一系列帖子时，开发人员可能需要根据 UX 的当前模型指示是否应根据两列渲染帖子。尽管今天只需要一个布尔值，但没有什么可以阻止 UX 在未来的版本中引入两行帖子、三列帖子或四方帖子。
 
-
 ```protobuf
 message GooglePlusPost {
   // Bad: Whether to render this post across two columns.
@@ -138,7 +139,6 @@ message GooglePlusPost {
   // post. If absent, assume a default rendering.
   optional LayoutConfig layout_config;
 }
-
 message Photo {
   // Bad: True if it's a GIF.
   optional bool gif;
@@ -147,9 +147,18 @@ message Photo {
   optional PhotoType type;
 }
 ```
-Be cautious about adding states to an enum that conflates concepts.
+谨慎地为概念混淆的枚举添加新枚举值。
 
-In this case follow the guidelines below.
+如果新增字段为枚举引入了新的维度或暗示多个应用程序行为，您几乎肯定需要另起一个字段。
+
+## 少用整数字段作为 ID 
+
+虽然将 int64 用作对象的标识符很有诱惑力，但建议选择使用字符串。
+
+这使您在需要时可以更改 ID 空间，并减少了碰撞的机会，2^64 不再像想象的那么大了。
+
+您还可以将结构化标识符编码为字符串，这会鼓励客户端将其视为不透明的 blob。您仍然必须为字符串提供一个 proto 支持，但您可以将 proto 序列化为字符串字段（编码为Base64），从而从客户端公开的 API 中删除所有内部详细信息。在这种情况下，请遵循以下准则。
+
 ```protobuf
 message GetFooRequest {
   // Which Foo to fetch.
@@ -165,45 +174,79 @@ message InternalFooRef {
   optional int64 classic_foo_id;
 }
 ```
-If you
+如果您从一开始就使用自己的序列化方案来表示字符串中的 ID，事情可能很快变得奇怪。这就是为什么通常最好从支持字符串字段的内部 proto 开始。
+
+## 不要把您期望客户端构造或解析的数据编码到字符串中 
+
+这在传输过程中效率较低，对于 proto 的使用者来说工作量更大，而且对于阅读您文档的人来说会造成困惑。您的客户端还必须考虑编码：列表是用逗号分隔的吗？我是否正确地转义了这个不受信任的数据？数字是十进制的吗？最好让客户端发送实际的消息或原始类型。这在传输过程中更紧凑，对您的客户端更清晰。
+
+当您的服务在多种语言中获得客户端时，这种情况会变得特别糟糕。现在，每个客户端都必须选择正确的解析器或构建器，或者更糟糕的是，编写一个。
+
+更一般地说，选择正确的原始类型。请参阅 Protocol Buffer Language Guide [中的标量值类型表](https://protobuf.dev/programming-guides/proto2/#scalar)。
+
+### 在前端 Proto 中返回 HTML 
+对于 JavaScript 客户端，将 HTML 或 JSON 返回到 API 的字段中可能很有诱惑力，这是一个通往将您的 API 与特定 UI 绑定的滑坡。以下是三个具体的危险：
+
+- 一个“敏捷”的非 Web 客户端最终会解析您的 HTML 或 JSON 以获取他们想要的数据，如果您更改格式，这会导致脆弱性，如果他们的解析不佳，将产生漏洞。 
+- 如果 HTML 未经过消毒就返回，您的 Web 客户端现在容易受到 XSS 攻击。 
+- 您返回的标签和类期望特定的样式表和 DOM 结构。从一个版本到另一个版本，结构会发生变化，您面临版本倾斜问题，其中 JavaScript 客户端比服务器旧，服务器返回的 HTML 在旧客户端上不再正确呈现。对于经常发布的项目来说，这不是一个边缘情况。
+
+除了初始页面加载之外，通常最好返回数据并使用客户端模板在客户端上构建 HTML。
+
+## 将不透明数据用web安全编码方式放到string里面 
+
+如果你在客户端可见的字段中编码了不透明数据（如连续令牌、序列化ID、版本信息等），请在文档中说明客户端应将其视为不透明的数据块。始终使用二进制proto序列化，永远不要使用文本格式或你自己设计的格式来处理这些字段。当你需要扩展在不透明字段中编码的数据时，如果你还没有使用它，你会发现自己在重新发明协议缓冲区序列化。
+
+定义一个内部proto来保存将放入不透明字段的字段（即使你只需要一个字段），将这个内部proto序列化为字节，然后将结果进行web安全的base-64编码，放入你的字符串字段。
+
+使用proto序列化的一个罕见例外：非常偶尔，从精心构造的替代格式中获得的紧凑性优势是值得的。
+
+## 不要包含客户端不会使用的字段 
+
+你向客户端公开的API应仅用于描述如何与你的系统交互，在其中包含其他任何内容都会增加试图理解它的人的认知负担。
+
+在响应proto中返回调试数据曾经是一种常见的做法，但我们现在有了更好的方法。RPC响应扩展（也称为“侧通道”）让你可以用一个proto描述你的客户端接口，用另一个描述你的调试界面。
+
+同样，将实验名称返回在响应proto中曾经是一种方便的记录方式——未明确约定的合同是客户端会在后续操作中将这些实验返回。现在，实现同样的目标的公认方法是在分析管道中进行日志连接。
+
+有一个例外：
+
+如果你需要连续的、实时的分析，并且在小型机器预算上，运行日志连接可能会被禁止。在成本是决定因素的情况下，提前对日志数据进行非规范化处理可能是一种好处。如果你需要将日志数据往返传输，将其作为一个不透明的数据块发送给客户端，并记录请求和响应字段。
+
+**警告**：如果你需要在每个请求上返回或往返隐藏的数据，你就在隐藏使用你的服务的真实成本，这也不好。
+
+## 不要定义没有连续令牌的分页API
+
 ```protobuf
 message FooQuery {
-  // Bad: If the data changes between the first query and second, each of
-  // these strategies can cause you to miss results. In an eventually
-  // consistent world (that is, storage backed by Bigtable), it's not uncommon
-  // to have old data appear after the new data. Also, the offset- and
-  // page-based approaches all assume a sort-order, taking away some
-  // flexibility.
+  // bad：如果数据在第一次查询和第二次查询之间发生变化，这些策略都可能导致你漏掉一些结果数据。在最终一致性的世界中（比如，由Bigtable支持的存储），旧数据在新数据之后出现并不罕见。此外，基于偏移量和页面的方法都假设了一个排序顺序，从而减少了一些灵活性。
   optional int64 max_timestamp_ms;
   optional int32 result_offset;
   optional int32 page_number;
   optional int32 page_size;
 
-  // Good: You've got flexibility! Return this in a FooQueryResponse and
-  // have clients pass it back on the next query.
+  // Good: 你有了灵活性！在FooQueryResponse中返回这个，并让客户端在下一次查询时传回来。
   optional string next_page_token;
 }
 ```
-The best practice for a pagination API is to use an opaque continuation token (called next_page_token ) backed by an internal proto that you serialize and then WebSafeBase64Escape (C++) or BaseEncoding.base64Url().encode (Java). That internal proto could include many fields. The important thing is it buys you flexibility and–if you choose–it can buy your clients stability in the results.
+分页API的最佳实践是使用一个由内部proto支持的不透明连续令牌（称为next_page_token），你将其序列化，然后使用WebSafeBase64Escape（C++）或BaseEncoding.base64Url().encode（Java）。那个内部proto可以包含许多字段。重要的是，它为你提供了灵活性，如果你选择，它也可以为你的客户端提供结果的稳定性。
 
-Do not forget to validate the fields of this proto as untrustworthy inputs (see note in Encode opaque data in strings).
+不要忘记验证这个proto的字段作为不可信的输入（参见在字符串中编码不透明数据的注释）。
+
 ```protobuf
 message InternalPaginationToken {
-  // Track which IDs have been seen so far. This gives perfect recall at the
-  // expense of a larger continuation token--especially as the user pages
-  // back.
+  // 跟踪到目前为止已经看到的ID。这提供了完美的回忆，但代价是连续令牌更大——尤其是当用户翻页时。
   repeated FooRef seen_ids;
 
-  // Similar to the seen_ids strategy, but puts the seen_ids in a Bloom filter
-  // to save bytes and sacrifice some precision.
+  // 类似于seen_ids策略，但是将seen_ids放在一个Bloom过滤器中，以节省字节并牺牲一些精度。
   optional bytes bloom_filter;
 
-  // A reasonable first cut and it may work for longer. Having it embedded in
-  // a continuation token lets you change it later without affecting clients.
+  // 一个合理的第一次尝试，可能会持续更长时间。将它嵌入到一个连续令牌中，让你以后可以在不影响客户端的情况下更改它。
   optional int64 max_timestamp_ms;
 }
 ```
-Group Related Fields into a New Message. Nest Only Fields with High Cohesion
+## 将相关字段分组到一个新的消息中，仅嵌套高内聚的字段
+
 ```protobuf
 message Foo {
   // Bad: The price and currency of this Foo.
@@ -214,10 +257,11 @@ message Foo {
   optional CurrencyAmount price;
 }
 ```
-Only fields with high cohesion should be nested. If the fields are genuinely related, you’ll often want to pass them around together inside a server. That’s easier if they’re defined together in a message. Think:
+只有高内聚的字段应该被嵌套。如果字段确实相关，你通常会希望在服务器内部一起传递它们。如果它们在一个消息中定义在一起，这会更容易。想想:
 
 CurrencyAmount calculateLocalTax(CurrencyAmount price, Location where)
-If your CL introduces one field, but that field might have related fields later, preemptively put it in its own message to avoid this:
+如果你的CL引入了一个字段，但是那个字段可能以后会有相关的字段，那么预先将它放在自己的消息中，以避免这样的情况:
+
 ```protobuf
 message Foo {
   // DEPRECATED! Use currency_amount.
@@ -227,8 +271,10 @@ message Foo {
   optional google.type.Money currency_amount;
 }
 ```
+嵌套消息的问题在于，虽然CurrencyAmount可能是在API的其他地方重用的热门候选对象，但Foo.CurrencyAmount可能不是。在最糟糕的情况下，Foo.CurrencyAmount被重用，但Foo特定的字段泄漏到其中。
 
-proto files.
+虽然在开发系统时，松散耦合通常被认为是最佳实践，但在设计.proto文件时，这种做法可能并不总是适用。在某些情况下，将两个信息单元紧密耦合（通过将一个单元嵌套在另一个单元内）可能是有意义的。例如，如果您正在创建一组当前看起来相当通用的字段，但您预计稍后会在其中添加专门的字段，那么嵌套消息将阻止其他人从此.proto文件或其他.proto文件中引用该消息。
+
 ```protobuf
 message Photo {
   // Bad: It's likely PhotoMetadata will be reused outside the scope of Photo,
